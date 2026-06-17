@@ -1,7 +1,7 @@
 import streamlit as st
 import cv2
 import numpy as np
-import tflite-runtime.interpreter as tflite
+import tflite_runtime.interpreter as tflite
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
 # 1. Konfigurasi Halaman
