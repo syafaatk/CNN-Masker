@@ -1,102 +1,101 @@
 import streamlit as st
+import cv2
 import numpy as np
-from PIL import Image
+import tflite-runtime.interpreter as tflite
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
 # 1. Konfigurasi Halaman
 st.set_page_config(
-    page_title="Detektor Masker Wajah",
+    page_title="Real-time Mask Detector",
     page_icon="😷",
     layout="centered"
 )
 
-st.title("😷 Detektor Masker Wajah (CNN - Lightweight Engine)")
-st.write("Aplikasi deteksi penggunaan masker wajah via Kamera atau Unggah Foto.")
+st.title("😷 Real-time Face Mask Detector & Tracking")
+st.write("Aplikasi mendeteksi penggunaan masker secara real-time dengan tracking kotak pada wajah.")
 
-# 2. Memuat Interpreter TFLite Menggunakan Library Bawaan Python (Sangat Aman)
+# 2. Muat Model TFLite & Haar Cascade Wajah (Cached agar ringan)
 @st.cache_resource
-def load_tflite_interpreter():
-    try:
-        # Mencoba memuat menggunakan library standar streamlit cloud
-        import tflite_runtime.interpreter as tflite
-        interpreter = tflite.Interpreter(model_path="model_masker.tflite")
-        interpreter.allocate_tensors()
-        return interpreter
-    except ImportError:
-        try:
-            # Fallback jika berjalan di environment lokal dengan tensorflow penuh
-            import tensorflow as tf
-            interpreter = tf.lite.Interpreter(model_path="model_masker.tflite")
-            interpreter.allocate_tensors()
-            return interpreter
-        except Exception as e:
-            st.error(f"Gagal memuat engine model. Error: {e}")
-            return None
+def load_models():
+    # Load TFLite Model
+    interpreter = tflite.Interpreter(model_path="model_masker.tflite")
+    interpreter.allocate_tensors()
+    
+    # Load Pre-trained Face Detector bawaan OpenCV (Haar Cascade)
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    
+    return interpreter, face_cascade
 
-interpreter = load_tflite_interpreter()
+interpreter, face_cascade = load_models()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
-if interpreter is not None:
-    st.success("Model .tflite Berhasil Dimuat!")
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-else:
-    st.error("⚠️ Aplikasi dihentikan karena model gagal dimuat.")
-    st.stop()
+# 3. Kelas Transformer untuk Memproses Video Stream per Frame
+class FaceMaskTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.interpreter = interpreter
+        self.face_cascade = face_cascade
+        self.input_details = input_details
+        self.output_details = output_details
 
-# 3. Menu Pilihan Metode Input Gambar
-metode_input = st.selectbox(
-    "Pilih Metode Input Gambar:",
-    ("Gunakan Kamera (Webcam)", "Unggah File Foto")
+    def transform(self, frame):
+        # Konversi frame video menjadi format numpy array (BGR)
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Konversi ke Grayscale untuk deteksi wajah yang lebih cepat
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Deteksi Wajah
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        
+        for (x, y, w, h) in faces:
+            try:
+                # Potong area wajah (ROI)
+                roi_color = img[y:y+h, x:x+w]
+                
+                # Preprocessing Wajah untuk Model (Resize ke 120x120 & konversi ke RGB)
+                roi_rgb = cv2.cvtColor(roi_color, cv2.COLOR_BGR2RGB)
+                img_resized = cv2.resize(roi_rgb, (120, 120))
+                
+                # Normalisasi (1./255) & Expand dimensi menjadi (1, 120, 120, 3)
+                img_array = np.array(img_resized, dtype=np.float32) / 255.0
+                img_batch = np.expand_dims(img_array, axis=0)
+                
+                # Jalankan Prediksi TFLite
+                self.interpreter.set_tensor(self.input_details[0]['index'], img_batch)
+                self.interpreter.invoke()
+                prediction = self.interpreter.get_tensor(self.output_details[0]['index'])[0][0]
+                
+                # Tentukan Label dan Warna Kotak
+                # Catatan: Jika saat training 0 = Masker dan 1 = Tanpa Masker
+                if prediction < 0.5:
+                    label = f"Bermasker: {(1 - prediction)*100:.1f}%"
+                    color = (0, 255, 0) # Hijau (BGR)
+                else:
+                    label = f"Tanpa Masker: {prediction*100:.1f}%"
+                    color = (0, 0, 255) # Merah (BGR)
+                
+                # Gambar kotak pelacak (Green/Red Box) pada wajah
+                cv2.rectangle(img, (x, y), (x+w, y+h), color, 3)
+                
+                # Tulis teks label di atas kotak wajah
+                cv2.putText(img, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+            except Exception as e:
+                pass
+                
+        return img
+
+# 4. Jalankan Kamera Real-time di Streamlit
+st.subheader("Live Camera Feed")
+webrtc_streamer(
+    key="face-mask-detection",
+    mode=WebRtcMode.SENDRECV,
+    video_transformer_factory=FaceMaskTransformer,
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}] # Menggunakan server STUN Google agar lancar di Cloud
+    },
+    media_stream_constraints={"video": True, "audio": False}, # Matikan audio agar hemat bandwidth
 )
 
-image = None
-
-if metode_input == "Gunakan Kamera (Webcam)":
-    img_file_buffer = st.camera_input("Posisikan wajah Anda di tengah kamera")
-    if img_file_buffer is not None:
-        image = Image.open(img_file_buffer)
-else:
-    uploaded_file = st.file_uploader("Pilih gambar...", type=["jpg", "jpeg", "png"])
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption='Gambar yang diunggah', use_column_width=True)
-
-# 4. Proses Prediksi Menggunakan NumPy & Interpreter TFLite
-if image is not None:
-    st.write("Sedang menganalisis wajah...")
-    
-    # Preprocessing Gambar (Resize ke 120x120 dan konversi ke RGB)
-    IMG_SIZE = (120, 120)
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-        
-    img_resized = image.resize(IMG_SIZE)
-    img_array = np.array(img_resized, dtype=np.float32)
-    
-    # Normalisasi (Skala 1./255) sesuai proses training Anda
-    img_array = img_array / 255.0
-    
-    # Tambahkan dimensi batch -> (1, 120, 120, 3)
-    img_batch = np.expand_dims(img_array, axis=0)
-    
-    try:
-        # Jalankan Inferensi TFLite secara manual (Sangat ringan & cepat)
-        interpreter.set_tensor(input_details[0]['index'], img_batch)
-        interpreter.invoke()
-        
-        # Mengambil hasil akhir dari layer output (Aktivasi Sigmoid)
-        prediction = interpreter.get_tensor(output_details[0]['index'])[0][0]
-        
-        # 5. Menampilkan Hasil Klasifikasi
-        st.subheader("Hasil Analisis:")
-        if prediction < 0.5:
-            confidence = (1 - prediction) * 100
-            st.success(f"✅ **Menggunakan Masker** (Tingkat Keyakinan: {confidence:.2f}%)")
-        else:
-            confidence = prediction * 100
-            st.error(f"❌ **Tidak Menggunakan Masker** (Tingkat Keyakinan: {confidence:.2f}%)")
-            
-        with st.expander("Lihat Detail Output Model"):
-            st.write(f"Nilai mentah aktivasi Sigmoid: {prediction:.4f}")
-            
-    except Exception as e:
-        st.error(f"Terjadi kesalahan saat melakukan prediksi: {e}")
+st.info("💡 Catatan: Berikan izin akses kamera pada browser Anda. Kotak otomatis melacak wajah dan berubah warna berdasarkan status masker.")

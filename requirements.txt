@@ -1,5 +1,6 @@
 streamlit
-tflite-runtime
+streamlit-webrtc
 opencv-python-headless
+tflite-runtime
 numpy
 Pillow
