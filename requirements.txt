@@ -2,5 +2,5 @@ streamlit
 streamlit-webrtc
 opencv-python-headless
 tflite-runtime
-numpy
+numpy<2.0.0
 Pillow
