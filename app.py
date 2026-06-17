@@ -27,7 +27,7 @@ except Exception as e:
     st.error(f"Gagal memuat model 'model_masker.tflite'. Pastikan file ada di repo. Error: {e}")
 
 # 3. Menu Pilihan Metode Input Gambar
-Metode_input = st.selectbox(
+metode_input = st.selectbox(
     "Pilih Metode Input Gambar:",
     ("Gunakan Kamera (Webcam)", "Unggah File Foto")
 )
